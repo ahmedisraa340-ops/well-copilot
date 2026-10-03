@@ -34,6 +34,31 @@ def last_error():
     return _last_error
 
 
+def generate(contents, system, tools=None, max_tokens=1200):
+    """Low-level Gemini call with optional function calling.
+    contents: list of {"role": "user"|"model", "parts": [...]}. Returns the model's content dict.
+    Raises RuntimeError on any failure (the caller decides what to show)."""
+    global _last_error
+    key = _key()
+    if not key:
+        raise RuntimeError("no API key set")
+    body = {
+        "systemInstruction": {"parts": [{"text": system}]},
+        "contents": contents,
+        "generationConfig": {"maxOutputTokens": max_tokens * 4, "temperature": 0.2},
+    }
+    if tools:
+        body["tools"] = [{"functionDeclarations": tools}]
+    r = requests.post(ENDPOINT.format(model=MODEL), json=body, timeout=90,
+                      headers={"x-goog-api-key": key, "Content-Type": "application/json"})
+    if r.status_code != 200:
+        _last_error = f"HTTP {r.status_code}: {r.text[:300]}"
+        raise RuntimeError(_last_error)
+    cand = r.json().get("candidates", [{}])[0]
+    _last_error = ""
+    return cand.get("content") or {"role": "model", "parts": []}
+
+
 def ask(system, user, max_tokens=1200):
     """Return model text, or None if there is no key or the call fails."""
     global _last_error
