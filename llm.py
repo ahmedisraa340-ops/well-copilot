@@ -1,6 +1,7 @@
 """Gemini wrapper (Google AI Studio key). Plain REST, so no extra SDK is needed.
 ask() returns None on any failure, and every caller has a rule-based fallback."""
 import os
+import time
 
 import requests
 
@@ -10,7 +11,9 @@ try:
 except Exception:
     pass
 
-MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+# tried in order if the chosen model is retired or unavailable (HTTP 404)
+FALLBACK_MODELS = ["gemini-3.8-flash", "gemini-flash-latest", "gemini-2.5-flash"]
 ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 _last_error = ""
 
@@ -24,6 +27,36 @@ def _key():
         except Exception:
             key = None
     return (key or "").strip().strip('"').strip("'") or None
+
+
+def _model():
+    m = os.getenv("GEMINI_MODEL")
+    if not m:
+        try:
+            import streamlit as st
+            m = st.secrets.get("GEMINI_MODEL")
+        except Exception:
+            m = None
+    return (m or MODEL).strip().strip('"').strip("'")
+
+
+def _post(body, key):
+    """POST to Gemini.
+    - 404 (model retired): move to the next fallback model.
+    - 429/500/502/503/504 (busy or overloaded): wait briefly and retry, then try the next model."""
+    order = [_model()] + [m for m in FALLBACK_MODELS if m != _model()]
+    r = None
+    for model in order:
+        for attempt in range(3):
+            r = requests.post(ENDPOINT.format(model=model), json=body, timeout=90,
+                              headers={"x-goog-api-key": key, "Content-Type": "application/json"})
+            if r.status_code in (429, 500, 502, 503, 504):
+                time.sleep(2 * (attempt + 1))
+                continue
+            break
+        if r.status_code not in (404, 429, 500, 502, 503, 504):
+            return r
+    return r
 
 
 def available():
@@ -49,8 +82,7 @@ def generate(contents, system, tools=None, max_tokens=1200):
     }
     if tools:
         body["tools"] = [{"functionDeclarations": tools}]
-    r = requests.post(ENDPOINT.format(model=MODEL), json=body, timeout=90,
-                      headers={"x-goog-api-key": key, "Content-Type": "application/json"})
+    r = _post(body, key)
     if r.status_code != 200:
         _last_error = f"HTTP {r.status_code}: {r.text[:300]}"
         raise RuntimeError(_last_error)
@@ -72,8 +104,7 @@ def ask(system, user, max_tokens=1200):
         "generationConfig": {"maxOutputTokens": max_tokens * 4, "temperature": 0.3},
     }
     try:
-        r = requests.post(ENDPOINT.format(model=MODEL), json=body, timeout=90,
-                          headers={"x-goog-api-key": key, "Content-Type": "application/json"})
+        r = _post(body, key)
         if r.status_code != 200:
             raise RuntimeError(f"HTTP {r.status_code}: {r.text[:300]}")
         parts = r.json()["candidates"][0]["content"]["parts"]
