@@ -4,7 +4,7 @@ import io
 import pandas as pd
 import streamlit as st
 
-import formation, llm
+import ask, formation, llm
 from orchestrator import run_pipeline, save_approved
 import data_loader as dl
 from las_reader import read_las
@@ -65,6 +65,7 @@ def surveillance():
         st.session_state["units"] = units
         st.session_state["report_text"] = result["report"]
         st.session_state.pop("saved", None)
+        st.session_state.pop("chat", None)
 
     result = st.session_state.get("result")
     if result is None:
@@ -82,8 +83,8 @@ def surveillance():
     c4.metric("EUR (Arps)", f"{d['eur']:,.0f}" if d else "n/a",
               delta=f"b = {d['b']:.2f}" if d else None, delta_color="off")
 
-    tab_chart, tab_events, tab_diag, tab_report, tab_trace = st.tabs(
-        ["📈 Chart", "🚨 Anomalies", "🩺 Diagnosis", "📝 Report & approval", "🤖 Agent trace"])
+    tab_chart, tab_events, tab_diag, tab_report, tab_ask, tab_trace = st.tabs(
+        ["📈 Chart", "🚨 Anomalies", "🩺 Diagnosis", "📝 Report & approval", "💬 Ask your well", "🤖 Agent trace"])
 
     with tab_chart:
         st.pyplot(result["fig"])
@@ -123,6 +124,35 @@ def surveillance():
         st.download_button("⬇ Download report (.md)", st.session_state["report_text"], file_name=f"{well}_report.md")
         st.markdown("---")
         st.markdown(st.session_state["report_text"])
+
+    with tab_ask:
+        st.caption("Ask a question in plain language. The AI picks engineering tools, Python runs them, "
+                   "and you can see every tool call.")
+        if not llm.available():
+            st.info("This tab needs the Gemini key. Add GOOGLE_API_KEY in .env or in Streamlit secrets.")
+        else:
+            chat = st.session_state.setdefault("chat", {"shown": [], "history": []})
+            examples = ["Why did the oil rate fall?", "How has the water cut changed?",
+                        "How much reserves remain if the economic limit is 20?"]
+            cols = st.columns(len(examples))
+            picked = None
+            for col, ex in zip(cols, examples):
+                if col.button(ex, use_container_width=True):
+                    picked = ex
+            for msg in chat["shown"]:
+                with st.chat_message(msg["role"]):
+                    st.write(msg["text"])
+                    for stp in msg.get("steps", []):
+                        with st.expander(f"🔧 Tool: {stp['tool']} {stp['args'] or ''}"):
+                            st.json(stp["result"])
+            question = st.chat_input("Ask about this well...") or picked
+            if question:
+                chat["shown"].append({"role": "user", "text": question})
+                with st.spinner("Thinking and calling tools..."):
+                    text, chat["history"], steps = ask.answer(
+                        question, chat["history"], ask.WellTools(result, units), well, units)
+                chat["shown"].append({"role": "assistant", "text": text, "steps": steps})
+                st.rerun()
 
     with tab_trace:
         for t in result["trace"]:
